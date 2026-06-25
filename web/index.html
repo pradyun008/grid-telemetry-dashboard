@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Grid Telemetry</title>
+<link rel="stylesheet" href="/static/vendor/uPlot.min.css" />
+<style>
+  :root {
+    --bg:        #0b0f14;
+    --panel:     #121822;
+    --panel-2:   #0e131b;
+    --line:      #1f2937;
+    --ink:       #e6edf3;
+    --ink-dim:   #7d8da1;
+    --ink-faint: #4b596b;
+    --ok:        #3fb950;
+    --warn:      #d29922;
+    --grid:      #1a2230;
+    /* per-channel accents, assigned in order */
+    --c0: #2dd4bf; /* frequency  */
+    --c1: #a78bfa; /* voltage    */
+    --c2: #f0b429; /* power      */
+    --c3: #4ade80; /* pf         */
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace; }
+
+  header {
+    display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--panel-2), var(--bg));
+  }
+  header h1 {
+    font-size: 14px; font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; margin: 0; color: var(--ink);
+  }
+  header .sub { font-size: 12px; color: var(--ink-dim); letter-spacing: .04em; }
+  .spacer { flex: 1; }
+  .status {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; letter-spacing: .06em; color: var(--ink-dim);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); }
+  .dot.live { background: var(--ok); box-shadow: 0 0 0 0 rgba(63,185,80,.5); animation: pulse 2s infinite; }
+  .dot.down { background: var(--warn); animation: none; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(63,185,80,.45); }
+    70%  { box-shadow: 0 0 0 6px rgba(63,185,80,0); }
+    100% { box-shadow: 0 0 0 0 rgba(63,185,80,0); }
+  }
+
+  main {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    padding: 20px 24px 28px;
+    max-width: 1400px; margin: 0 auto;
+  }
+  @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 16px 8px;
+    position: relative;
+    overflow: hidden;
+  }
+  .panel::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--accent);
+  }
+  .phead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .label { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); }
+  .nominal { font-size: 11px; color: var(--ink-faint); margin-top: 2px; letter-spacing: .03em; }
+
+  .readout { text-align: right; line-height: 1; }
+  .value { font-size: 30px; font-weight: 600; color: var(--ink); letter-spacing: -.01em; }
+  .value .unit { font-size: 14px; color: var(--ink-dim); font-weight: 500; margin-left: 4px; }
+  .delta { font-size: 12px; margin-top: 6px; color: var(--ink-dim); }
+  .delta.warn { color: var(--warn); }
+  .health {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ok); margin-right: 6px; vertical-align: middle;
+  }
+  .health.warn { background: var(--warn); }
+
+  .chart { margin-top: 10px; }
+  /* uPlot dark theme tweaks */
+  .uplot, .u-legend { color: var(--ink-dim); font-family: ui-monospace, Menlo, monospace; }
+  .u-legend { font-size: 11px; }
+  .uplot .u-axis { color: var(--ink-faint); }
+
+  footer {
+    padding: 0 24px 24px; max-width: 1400px; margin: 0 auto;
+    font-size: 11px; color: var(--ink-faint); letter-spacing: .03em;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Grid Telemetry</h1>
+    <span class="sub mono" id="clock" style="font-weight:700; color:var(--ink);">--:--:--</span>
+    <div class="spacer"></div>
+    <span class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></span>
+  </header>
+
+  <main id="grid"></main>
+
+  <footer>
+    Synthetic data &middot; 1&nbsp;Hz push (SSE) &middot; <span id="window">last 5&nbsp;min</span> sliding window &middot;
+    charts auto-range tightly around each channel's nominal so small moves stay visible.
+  </footer>
+
+  <script src="/static/vendor/uPlot.iife.min.js"></script>
+  <script>
+  (async function () {
+    const WINDOW = 10;             // points kept on screen (10 sec at 1 Hz)
+    const ACCENTS = ["--c0", "--c1", "--c2", "--c3"];
+    const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+    // 1) Learn what channels exist (single source of truth lives on the server).
+    const channels = await fetch("/channels").then((r) => r.json());
+
+    // Per-channel runtime state.
+    const panels = {};         // key -> { plot, valueEl, deltaEl, healthEl }
+    const xs = [];             // shared timestamps (seconds)
+    const ys = {};             // key -> array of values
+    channels.forEach((c) => { ys[c.key] = []; });
+
+    document.getElementById("window").textContent = "last " + WINDOW + " sec";
+
+
+    // 2) Build a panel + chart per channel.
+    const grid = document.getElementById("grid");
+    channels.forEach((c, i) => {
+      const accent = cssVar(ACCENTS[i % ACCENTS.length]);
+
+      const panel = document.createElement("section");
+      panel.className = "panel";
+      panel.style.setProperty("--accent", accent);
+      panel.innerHTML = `
+        <div class="phead">
+          <div>
+            <div class="label">${c.label}</div>
+            <div class="nominal mono">nominal ${c.nominal.toFixed(c.precision)} ${c.unit}</div>
+          </div>
+          <div class="readout">
+            <div class="value mono"><span data-v>—</span><span class="unit">${c.unit}</span></div>
+            <div class="delta mono"><span class="health" data-h></span><span data-d>Δ —</span></div>
+          </div>
+        </div>
+        <div class="chart" data-chart></div>`;
+      grid.appendChild(panel);
+
+      const chartEl = panel.querySelector("[data-chart]");
+      const width = chartEl.clientWidth || 600;
+
+      const opts = {
+        width: width,
+        height: 150,
+        cursor: { y: false, points: { size: 5 } },
+        legend: { show: false },
+        scales: { x: { time: true }, y: { range: [0, 50] } },
+        axes: [
+          {
+            stroke: cssVar("--ink-faint"),
+            grid: { stroke: cssVar("--grid"), width: 1 },
+            ticks: { stroke: cssVar("--grid") },
+            space: 30,
+            values: (u, splits) => {
+              let prevMin = null;
+              return splits.map(v => {
+                if (v == null) return "";
+                const d = new Date(v * 1000);
+                const min = d.getHours() * 60 + d.getMinutes();
+                const ss = String(d.getSeconds()).padStart(2, "0");
+                if (min !== prevMin) {
+                  prevMin = min;
+                  const hh = String(d.getHours()).padStart(2, "0");
+                  const mm = String(d.getMinutes()).padStart(2, "0");
+                  return `${hh}:${mm}`;
+                }
+                return `:${ss}`;
+              });
+            },
+          },
+          {
+            stroke: cssVar("--ink-faint"),
+            grid: { stroke: cssVar("--grid"), width: 1 },
+            ticks: { stroke: cssVar("--grid") },
+            size: 56,
+            splits: () => [0, 25, 50],
+            values: (u, ticks) => ticks.map((v) => v.toFixed(0)),
+          },
+        ],
+        series: [
+          {},
+          { stroke: accent, width: 1.6, points: { show: false } },
+          {
+            // nominal reference line (constant)
+            stroke: cssVar("--ink-faint"),
+            width: 1,
+            dash: [4, 5],
+            points: { show: false },
+          },
+        ],
+      };
+
+      const plot = new uPlot(opts, [[], [], []], chartEl);
+
+      panels[c.key] = {
+        cfg: c,
+        plot: plot,
+        valueEl: panel.querySelector("[data-v]"),
+        deltaEl: panel.querySelector("[data-d]"),
+        deltaWrap: panel.querySelector(".delta"),
+        healthEl: panel.querySelector("[data-h]"),
+        chartEl: chartEl,
+      };
+    });
+
+    // Keep charts sized to their container on window resize.
+    window.addEventListener("resize", () => {
+      Object.values(panels).forEach((p) => {
+        p.plot.setSize({ width: p.chartEl.clientWidth || 600, height: 150 });
+      });
+    });
+
+    // 3) Render one tick of data into every panel.
+    function render() {
+      const x = xs;
+      channels.forEach((c) => {
+        const p = panels[c.key];
+        const y = ys[c.key];
+        const nominalLine = new Array(x.length).fill(c.nominal);
+        p.plot.setData([x, y, nominalLine]);
+
+        const v = y[y.length - 1];
+        if (v == null) return;
+        const dev = v - c.nominal;
+        const warned = v < c.warn_low || v > c.warn_high;
+
+        p.valueEl.textContent = v.toFixed(c.precision);
+        const sign = dev >= 0 ? "+" : "−";
+        p.deltaEl.textContent = `Δ ${sign}${Math.abs(dev).toFixed(c.precision)} ${c.unit}`.trim();
+        p.deltaWrap.classList.toggle("warn", warned);
+        p.healthEl.classList.toggle("warn", warned);
+      });
+    }
+
+    // 4) Connect to the live stream.
+    const dot = document.getElementById("dot");
+    const statusText = document.getElementById("statusText");
+    const clock = document.getElementById("clock");
+
+    function setStatus(state) {
+      dot.className = "dot " + state;
+      statusText.textContent =
+        state === "live" ? "live · 1 Hz" : state === "down" ? "reconnecting…" : "connecting…";
+    }
+
+    const es = new EventSource("/stream");
+    es.onopen = () => setStatus("live");
+    es.onerror = () => setStatus("down");
+    es.onmessage = (ev) => {
+      setStatus("live");
+      const s = JSON.parse(ev.data);
+
+      xs.push(s.t);
+      channels.forEach((c) => ys[c.key].push(s[c.key]));
+      if (xs.length > WINDOW) {
+        xs.shift();
+        channels.forEach((c) => ys[c.key].shift());
+      }
+
+      const d = new Date(s.t * 1000);
+      clock.textContent = d.toLocaleTimeString([], { hour12: false });
+      render();
+    };
+  })();
+  </script>
+</body>
+</html>
