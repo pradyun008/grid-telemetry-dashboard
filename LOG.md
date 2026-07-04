@@ -105,3 +105,61 @@ See updated decisions D2, D5, D6.
 - `makeRange()` with nominal-centric logic produced near-flat charts (y-axis
   locked to ~25±0.02) because the nominal reference line anchored dataMin.
   Replaced with fixed `[0, 50]`.
+
+---
+
+## 2026-07-03 — Design CSV batch mode (alternate feed)
+
+**Goal.** Design a second, alternate data-feed mode alongside the existing
+live 1 Hz SSE stream: synthetic data delivered as CSV batches on a
+schedule, with the dashboard window advancing in whole-batch increments
+rather than one point at a time.
+
+**Steps.**
+1. Brainstormed requirements via clarifying Q&A: mode is a toggle on the
+   same dashboard page (not a separate route); switching modes fully
+   resets chart state; rows-per-CSV and feed-interval are independently
+   configurable; window size is derived as `2 * rows_per_csv` (current
+   batch + previous one, matching the user's "minute window, 30s batches"
+   example); row timestamps within a batch are spread evenly across the
+   feed interval so a batch's time span always matches its arrival
+   cadence.
+2. Researched how real grid telemetry systems move data, to decide the
+   transport mechanism honestly rather than guessing: high-rate PMU/SCADA
+   telemetry streams continuously (IEEE C37.118 over TCP/UDP); AMI smart
+   meter interval data is commonly moved as literal batch CSV/XML file
+   exports consumed by MDMS on a schedule. See search results cited in
+   the design spec commit.
+3. Decided batch mode should simulate the latter pattern faithfully: the
+   server writes real `.csv` files to disk and the browser polls and
+   fetches the file over plain HTTP, rather than pushing CSV-shaped text
+   over a persistent SSE connection (considered and rejected — see
+   DECISIONS.md D8 alternatives).
+4. Wrote the full design as `DECISIONS.md` D8 (originally drafted as a
+   standalone spec file, then folded into `DECISIONS.md` to match this
+   project's existing convention of recording decisions there rather than
+   in a separate `docs/` tree).
+
+**Inputs / environment.** No code written yet — this was a design-only
+session.
+
+**Results.** Design agreed and recorded as D8. No implementation yet.
+
+**Rationale.** See D8 in full for the "why" behind each choice (transport,
+window derivation, prefetching, global vs. per-session state).
+
+**Dead ends.**
+- First draft of the spec was written to `docs/superpowers/specs/` as a
+  standalone markdown file — this project doesn't have a `docs/` folder
+  convention and records decisions in `DECISIONS.md` instead, so the
+  content was folded into D8 there and the `docs/` folder removed.
+- First transport proposal was JSON wrapping a CSV string sent over SSE;
+  rejected once we realized it wasn't a literal file. Second proposal was
+  raw multi-line CSV text over SSE (technically valid per the SSE spec's
+  multi-line `data:` framing) — still rejected in favor of an actual file
+  + HTTP fetch, since batch mode is meant to simulate real file-based
+  ingestion, not a stream carrying file-shaped content.
+
+**Next.** Write an implementation plan for D8 and build
+`src/batch_simulator.py`, the `/batch/*` endpoints in `src/server.py`, and
+the mode toggle + polling logic in `web/index.html`.

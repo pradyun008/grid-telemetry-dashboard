@@ -83,3 +83,66 @@ produces a reproducible stream. Dependencies are pinned in
 `requirements.txt`.
 **Why.** Matches the project's reproducibility commitment — a logged seed +
 pinned environment reproduces a run exactly.
+
+## D8 — CSV batch mode: an alternate, file-based feed
+**Decision.** Add a second feed mode, toggled on the same dashboard page,
+alongside the existing live 1 Hz SSE stream: a **CSV batch mode** that
+delivers synthetic data as discrete CSV files on a schedule instead of one
+point at a time.
+
+Two independently configurable knobs (set in the UI before starting batch
+mode):
+- `rows_per_csv` — rows per batch (default 30)
+- `feed_interval_seconds` — how often a new batch arrives (default 30)
+
+Row timestamps within a batch are spaced evenly across the interval
+(`spacing = feed_interval_seconds / rows_per_csv`), so a batch's internal
+time span always matches its arrival cadence — no overlaps, no gaps.
+
+**Window size is derived, not configured directly:** the dashboard always
+shows exactly the current batch plus the previous one —
+`window_points = 2 * rows_per_csv`. When a new batch arrives, the oldest
+batch's worth of points is dropped in one shot; the window advances in
+whole-batch increments, not a rolling one-point shift. Columns stay fixed
+at the existing 4 channels (`channel_1`–`channel_4`) — no new channel
+config for this feature.
+
+**Transport: real files, not a stream.** Researched how real grid
+telemetry moves (see LOG entry): high-rate PMU/SCADA data streams
+continuously (IEEE C37.118 over TCP/UDP), but AMI/MDMS meter-interval data
+is commonly moved as literal batch CSV/XML file exports on a schedule.
+Batch mode simulates the latter: the server writes each batch to an actual
+`.csv` file under `data/batches/` (gitignored scratch dir, retains last 3
+files), and the browser polls `GET /batch/latest` every
+`feed_interval_seconds` and fetches the file itself — no long-lived
+streaming connection for this mode.
+
+**Prefetch, not on-demand generation.** The server's background loop
+writes the *next* batch immediately after each send completes, rather than
+waiting until it's due — using the whole interval as slack. Batch
+generation is cheap (single-digit ms for realistic row counts), so this
+guarantees no visible delivery lag regardless of row count.
+
+Server-side batch state is global (single active session) rather than
+per-connection like `/stream` — this is a local single-user tool, so
+session isolation for a second concurrent user isn't needed.
+
+**Why.** The existing pipeline only demonstrates one delivery pattern
+(continuous point-at-a-time push). Real telemetry pipelines commonly use
+both patterns depending on the data's rate and purpose; adding batch mode
+lets the dashboard demonstrate the file-based ingestion pattern too,
+without disturbing the existing live mode.
+
+**Alternatives considered.** JSON-wrapped CSV text pushed over SSE
+(rejected — not a literal file, just JSON simulating one); raw multi-line
+CSV text pushed over SSE via repeated `data:` lines (rejected — still a
+streaming transport carrying file-shaped content, not an actual file
+object moving over HTTP); configurable window size independent of
+`2 * rows_per_csv` (rejected — added a knob without a clear use case;
+YAGNI for now).
+
+**How to change.** New batch endpoints and generator live in
+`src/batch_simulator.py` and the `/batch/*` routes in `src/server.py`;
+frontend mode toggle, controls, and polling logic live in
+`web/index.html`. See the full design writeup: `git show 0bb8a45` (prior
+`docs/superpowers/specs/` draft, since folded into this entry).
