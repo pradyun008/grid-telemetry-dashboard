@@ -47,8 +47,8 @@ add/rename channels — everything downstream adapts.
 WebSocket (see DECISIONS D-transport).
 
 **Batch mode (CSV polling):** `BatchGenerator.next_batch_csv()` builds a whole
-CSV in memory (header `t,channel_1..4` + N rows spaced across the feed
-interval). Server writes files to `data/batches/batch_XXXXX.csv`, keeps only
+CSV in memory (header `t,channel_1..4` + N rows spaced across the refresh
+interval, where N = ceil(reporting × refresh)). Server writes files to `data/batches/batch_XXXXX.csv`, keeps only
 the last `BATCH_RETENTION = 3`. Client polls for the newest file. See DECISIONS D8.
 
 ## Endpoints (`src/server.py`)
@@ -58,7 +58,7 @@ the last `BATCH_RETENTION = 3`. Client polls for the newest file. See DECISIONS 
 | GET    | `/`              | dashboard page (`web/index.html`)                              |
 | GET    | `/channels`      | JSON channel defs; frontend builds charts from this            |
 | GET    | `/stream`        | SSE telemetry, 1 sample/sec (live mode). `?seed=<int>`         |
-| POST   | `/batch/start`   | `?rows=&interval=&seed=`; writes batch 0, then one every `interval`s via bg task. Validates rows 1–10000, interval 0–3600 |
+| POST   | `/batch/start`   | `?points=&refresh=&reporting=&seed=`; writes batch 0, then one every `refresh`s via bg task. Validates: reporting 1–1000, refresh ≥ max(0.25, 1/reporting) and ≤ 3600, points ≥ ceil(reporting×refresh) and ≤ 10000 |
 | POST   | `/batch/stop`    | cancels bg loop, deletes `data/batches/`                       |
 | GET    | `/batch/latest`  | newest CSV via FileResponse; seq in `X-Batch-Seq` header       |
 
@@ -69,10 +69,10 @@ single-user tool, no per-connection isolation (unlike `/stream`).
 
 - Fetches `/channels`, builds one uPlot panel per channel.
 - **Live mode:** consumes `/stream` SSE, pushes 1 pt/sec, `WINDOW = 10` pts.
-- **Batch mode:** `startBatch()` calls `/batch/start`, then `pollBatch()` on a
-  timer every `interval`s. Dedupes via `X-Batch-Seq` vs `lastBatchSeq` (skips
+- **Batch mode:** `startBatch(points, refresh, reporting)` calls `/batch/start?points=&refresh=&reporting=`, then `pollBatch()` on a
+  timer every `refresh` seconds. Dedupes via `X-Batch-Seq` vs `lastBatchSeq` (skips
   re-render if unchanged). `parseCsv()` = naive `split("\n")`/`split(",")`.
-  `WINDOW = rows * 2`. `batchDividerPlugin()` draws a vertical divider at each
+  `WINDOW = points`. `batchDividerPlugin()` draws a vertical divider at each
   CSV boundary (tracked in `batchStarts[]`).
 
 ## Viewing the raw data
