@@ -47,3 +47,27 @@ def test_csv_cap_exceeded_rejected():
 def test_points_above_max_rejected():
     r = client.post("/batch/start", params={"points": 10001, "refresh": 1.0, "reporting": 2})
     assert r.status_code == 400
+
+
+def test_reporting_upper_boundary_accepted():
+    # reporting=1000 is the inclusive upper bound.
+    r = client.post("/batch/start", params={"points": 2000, "refresh": 1.0, "reporting": 1000})
+    assert r.status_code == 200
+
+
+def test_refresh_at_min_boundary_accepted():
+    # reporting=2 => min refresh = max(0.25, 1/2) = 0.5; exactly 0.5 is valid.
+    r = client.post("/batch/start", params={"points": 60, "refresh": 0.5, "reporting": 2})
+    assert r.status_code == 200
+
+
+def test_points_equal_batch_accepted():
+    # reporting=10, refresh=1.0 => batch=10; points == batch is the inclusive lower bound.
+    r = client.post("/batch/start", params={"points": 10, "refresh": 1.0, "reporting": 10})
+    assert r.status_code == 200
+
+
+def test_points_at_max_accepted():
+    # points == 10000 is the inclusive upper bound.
+    r = client.post("/batch/start", params={"points": 10000, "refresh": 1.0, "reporting": 2})
+    assert r.status_code == 200

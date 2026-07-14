@@ -23,7 +23,8 @@ class BatchGenerator:
         self.refresh_interval = refresh_interval        # float seconds
         self.rng = random.Random(seed)
         self.dt = 1.0 / reporting_rate                  # seconds between points
-        # Deterministic starting time when seeded for reproducibility; current time otherwise
+        # Wall-clock origin for report timestamps. The seed affects only the
+        # value pool (self.rng), never t0 -- report times are always real time.
         self.t0 = time.time()
         self.reported = 0                               # points reported so far
         self.batch_index = 0                            # 0-based refresh counter

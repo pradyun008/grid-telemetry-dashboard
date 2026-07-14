@@ -47,8 +47,9 @@ add/rename channels — everything downstream adapts.
 WebSocket (see DECISIONS D-transport).
 
 **Batch mode (CSV polling):** `BatchGenerator.next_batch_csv()` builds a whole
-CSV in memory (header `t,channel_1..4` + N rows spaced across the refresh
-interval, where N = ceil(reporting × refresh)). Server writes files to `data/batches/batch_XXXXX.csv`, keeps only
+CSV in memory (header `t,channel_1..4` + rows emitted as they come due each
+refresh; per-CSV count varies batch-to-batch, averaging reporting × refresh with
+a max of ceil(reporting × refresh) used for window sizing). Server writes files to `data/batches/batch_XXXXX.csv`, keeps only
 the last `BATCH_RETENTION = 3`. Client polls for the newest file. See DECISIONS D8.
 
 ## Endpoints (`src/server.py`)
