@@ -12,6 +12,7 @@ spot, and it needs no extra client library. See DECISIONS.md.
 
 import asyncio
 import json
+import math
 import shutil
 from pathlib import Path
 
@@ -26,6 +27,11 @@ from .simulator import GridSimulator
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 BATCH_DIR = Path(__file__).resolve().parent.parent / "data" / "batches"
 BATCH_RETENTION = 3
+
+MIN_REFRESH = 0.25      # hard floor on refresh interval (seconds)
+MAX_REFRESH = 3600      # seconds
+MAX_REPORTING = 1000    # points/sec
+MAX_POINTS = 10_000     # window / single-CSV row cap
 
 app = FastAPI(title="Grid Telemetry Dashboard")
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
@@ -85,19 +91,39 @@ def _write_batch(gen):
 
 async def _batch_loop(gen):
     while True:
-        await asyncio.sleep(gen.feed_interval_seconds)
+        await asyncio.sleep(gen.refresh_interval)
         _write_batch(gen)
 
 
 @app.post("/batch/start")
-async def batch_start(rows: int, interval: float, seed: int | None = None):
-    """(Re)start CSV batch mode: write batch 0 immediately, then one new
-    batch every `interval` seconds via a background task. See DECISIONS.md D8.
+async def batch_start(points: int, refresh: float, reporting: int, seed: int | None = None):
+    """(Re)start CSV batch mode with three independent knobs. Writes batch 0
+    immediately, then one new batch every `refresh` seconds via a background
+    task. See DECISIONS.md D9 and RESTRICTIONS.md.
     """
-    if rows < 1 or rows > 10_000:
-        raise HTTPException(400, "rows must be between 1 and 10000")
-    if interval <= 0 or interval > 3600:
-        raise HTTPException(400, "interval must be between 0 and 3600 seconds")
+    if reporting < 1 or reporting > MAX_REPORTING:
+        raise HTTPException(400, f"reporting must be between 1 and {MAX_REPORTING} points/sec")
+
+    min_refresh = max(MIN_REFRESH, 1.0 / reporting)
+    if refresh < min_refresh or refresh > MAX_REFRESH:
+        raise HTTPException(
+            400,
+            f"refresh must be between {min_refresh:g} and {MAX_REFRESH} seconds "
+            f"(can't refresh faster than the reporting rate)",
+        )
+
+    batch = math.ceil(reporting * refresh)
+    if batch > MAX_POINTS:
+        raise HTTPException(
+            400,
+            f"reporting x refresh = {batch} rows/CSV exceeds the {MAX_POINTS}-row limit; "
+            f"lower reporting or refresh",
+        )
+    if points < batch or points > MAX_POINTS:
+        raise HTTPException(
+            400,
+            f"points on screen must be between {batch} (one batch) and {MAX_POINTS}",
+        )
 
     if batch_state["task"] is not None:
         batch_state["task"].cancel()
@@ -106,7 +132,7 @@ async def batch_start(rows: int, interval: float, seed: int | None = None):
     BATCH_DIR.mkdir(parents=True, exist_ok=True)
     batch_state["seq"] = -1
 
-    gen = BatchGenerator(rows_per_csv=rows, feed_interval_seconds=interval, seed=seed)
+    gen = BatchGenerator(reporting_rate=reporting, refresh_interval=refresh, seed=seed)
     _write_batch(gen)
     batch_state["task"] = asyncio.create_task(_batch_loop(gen))
     return {"seq": batch_state["seq"]}
