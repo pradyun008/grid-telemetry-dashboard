@@ -24,7 +24,7 @@ class BatchGenerator:
         self.rng = random.Random(seed)
         self.dt = 1.0 / reporting_rate                  # seconds between points
         # Deterministic starting time when seeded for reproducibility; current time otherwise
-        self.t0 = 1000000.0 if seed is not None else time.time()
+        self.t0 = time.time()
         self.reported = 0                               # points reported so far
         self.batch_index = 0                            # 0-based refresh counter
         # Pre-generate the pool up front: channel values only, no timestamps.
@@ -44,9 +44,6 @@ class BatchGenerator:
         elapsed = (self.batch_index + 1) * self.refresh_interval
         total_due = math.floor(elapsed * self.reporting_rate + 1e-9)
         n_rows = total_due - self.reported
-        # Ensure at least one row when pool has been exhausted (for wrapping behavior)
-        if n_rows <= 0 and self.reported >= self.POOL_SIZE:
-            n_rows = 1
 
         buf = io.StringIO()
         fieldnames = ["t"] + [c.key for c in CHANNELS]

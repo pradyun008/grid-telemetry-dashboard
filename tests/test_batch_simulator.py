@@ -17,10 +17,14 @@ def test_header_matches_channels():
 
 
 def test_pool_is_pregenerated_and_seeded():
-    # Same seed => identical pool => identical output for identical call sequence.
+    # Same seed => identical pool => identical channel values. Timestamps are
+    # wall-clock (t0 = time.time()) and differ between instances, so compare
+    # only the channel columns, not the full CSV text.
     a = BatchGenerator(reporting_rate=5, refresh_interval=1.0, seed=42)
     b = BatchGenerator(reporting_rate=5, refresh_interval=1.0, seed=42)
-    assert a.next_batch_csv() == b.next_batch_csv()
+    va = [r[1:] for r in _rows(a.next_batch_csv())]
+    vb = [r[1:] for r in _rows(b.next_batch_csv())]
+    assert va == vb
 
 
 def test_constant_batch_size():
@@ -46,11 +50,14 @@ def test_timestamps_spaced_by_reporting_rate():
 
 
 def test_pool_loops_when_exhausted():
-    # Request more points than the pool holds; values must wrap to the start.
-    gen = BatchGenerator(reporting_rate=1, refresh_interval=1.0, seed=1)
-    gen.POOL_SIZE  # sanity: constant exists
-    first = _rows(gen.next_batch_csv())[0][1:]   # channel values of global row 0
-    # Advance the cursor to exactly POOL_SIZE, so the next row wraps to row 0.
-    gen.reported = BatchGenerator.POOL_SIZE
-    wrapped = _rows(gen.next_batch_csv())[0][1:]
-    assert wrapped == first
+    # Walk the generator forward naturally until the pool wraps. reporting=1000,
+    # refresh=1.0 => 1000 rows per batch; after 10 batches (10000 rows) the pool
+    # is exhausted, so batch 11's first row (global index 10000) must wrap to the
+    # same channel values as global row 0. No manual state poking — this drives
+    # the real code path with a consistent cursor and batch_index.
+    gen = BatchGenerator(reporting_rate=1000, refresh_interval=1.0, seed=1)
+    row0_values = _rows(gen.next_batch_csv())[0][1:]   # global row 0
+    for _ in range(9):
+        gen.next_batch_csv()                            # batches 1..9 -> reported=10000
+    wrap_first = _rows(gen.next_batch_csv())[0][1:]     # global row 10000
+    assert wrap_first == row0_values
