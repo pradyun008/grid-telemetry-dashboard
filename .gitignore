@@ -11,3 +11,6 @@ env/
 
 # CSV batch mode scratch output
 data/batches/
+
+# Playwright MCP scratch (browser verification)
+.playwright-mcp/
