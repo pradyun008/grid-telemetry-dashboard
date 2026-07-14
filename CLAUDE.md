@@ -25,7 +25,10 @@ grid-telemetry-dashboard/
 ```
 
 Docs: `README.md` (user-facing), `DECISIONS.md` (design rationale, referenced
-as D8 etc. in code comments), `LOG.md` (work log).
+as D8/D9 etc. in code comments), `LOG.md` (work log), `RESTRICTIONS.md`
+(batch-mode numeric limits — enforced in both server and frontend).
+
+**Before changing batch mode, read `RESTRICTIONS.md` and `LOG.md`.**
 
 ## Channels (`src/channels.py`)
 
