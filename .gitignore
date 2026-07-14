@@ -8,3 +8,9 @@ env/
 # Logs / scratch (LOG.md, DECISIONS.md, README.md are tracked; runtime junk is not)
 *.log
 .DS_Store
+
+# CSV batch mode scratch output
+data/batches/
+
+# Playwright MCP scratch (browser verification)
+.playwright-mcp/

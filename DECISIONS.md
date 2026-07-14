@@ -146,3 +146,79 @@ YAGNI for now).
 frontend mode toggle, controls, and polling logic live in
 `web/index.html`. See the full design writeup: `git show 0bb8a45` (prior
 `docs/superpowers/specs/` draft, since folded into this entry).
+
+## D9 — CSV batch mode: three independent knobs + pre-generated data
+**Decision.** Replace batch mode's two coupled inputs (`rows_per_csv`,
+`feed_interval_seconds`, with window hard-derived as `2 * rows`) with three
+**independent** fields, and switch from generating each batch on the spot to
+walking through a pre-generated pool.
+
+**The three fields (UI, set before Start):**
+- **Points on screen** — window size, how many points are visible. Integer.
+  Independent of everything else (no longer `2 * rows`).
+- **Refresh interval (seconds)** — how often the dashboard pulls a new CSV.
+  Expressed as an interval in seconds (not Hz), matching the existing
+  "Feed interval" field and avoiding two per-second numbers on screen.
+- **Reporting rate (points/second)** — how many points/sec the source
+  produces. Integer only.
+
+"Rows per CSV" is no longer an input. Each CSV carries exactly the points
+that came due during one refresh interval (see the CSV-build rule below).
+
+**Pre-generated data (replaces on-the-spot generation).** On `/batch/start`
+the server generates a **fixed pool** of random value-rows up front (channel
+values only, no baked timestamps), seeded for reproducibility. Reporting
+walks through the pool; **timestamps are assigned at report time** as
+`t0 + index * (1 / reporting_rate)`. When the pool is exhausted it **loops**:
+values wrap to the start, timestamps keep climbing monotonically, so batch
+mode runs indefinitely. Pool size is a fixed internal constant, not a user
+field (YAGNI).
+
+**CSV-build rule (point-spacing model).** Points sit `1 / reporting_rate`
+seconds apart. After refresh number `n` (0-based), the number of points that
+should have been reported is `total_due = floor((n + 1) * refresh * reporting)`,
+and the CSV holds `total_due - already_reported` rows. This means when the
+refresh interval is not a clean multiple of the point spacing, per-CSV row
+counts **wobble** (e.g. reporting=3/s, refresh=0.5s → 1, 2, 1, 2, ... rows),
+while the long-run rate stays exactly correct. This was chosen (over forcing
+equal-size CSVs by constraining the refresh field) to keep the three knobs
+fully independent — the user can type any legal refresh value. The window
+shows the last P points regardless of batch boundaries; batch dividers are
+still drawn where visible.
+
+**Restrictions (enforced backend + frontend; see `RESTRICTIONS.md`).**
+- Reporting rate: integer, `1 <= reporting <= 1000`.
+- Refresh interval: `refresh >= 1 / reporting` (can't refresh faster than
+  data is produced), **and** `refresh >= 0.25` (hard floor against polling
+  storms when `1/reporting` is tiny), **and** `refresh <= 3600`.
+- Points on screen: integer, `window >= ceil(reporting * refresh)`
+  (window must hold at least the largest possible single CSV), **and**
+  `window <= 10000`.
+- **Consequence — implicit CSV cap.** Because `window >= ceil(reporting *
+  refresh)` and `window <= 10000` together, a single CSV can never exceed
+  10000 rows: any combo where `reporting * refresh > 10000` (e.g.
+  reporting=1000, refresh=30) is rejected because no legal window exists.
+  This is what bounds CSV size now that "rows per CSV" is no longer a direct
+  input.
+
+**Why.** The old model coupled window to batch size (`2 * rows`) and mixed
+"how much data exists" with "how it's delivered." Separating production
+(reporting rate), delivery (refresh interval), and display (points on screen)
+lets each be reasoned about on its own and matches how real feeds behave
+(production rate and poll cadence are unrelated). Pre-generating the pool
+makes the underlying dataset stable — reporting rate just changes how fast we
+walk it, rather than changing the data itself.
+
+**Alternatives considered.** Refresh as Hz (rejected — two per-second numbers
+confuse); forcing equal-size CSVs by constraining refresh to multiples of the
+point spacing (rejected — re-couples refresh to reporting, rejects typed
+values); fractional reporting rates (rejected — integers only, simpler);
+stopping at pool end / a huge non-looping pool (rejected in favor of looping,
+so it runs forever); window as a fourth free value below batch size (rejected
+— enforce `window >= batch` so a batch always fits on screen).
+
+**How to change.** Field wiring and client-side validation live in
+`web/index.html`; the pool, cursor, and CSV-build logic in
+`src/batch_simulator.py`; the `/batch/start` params and server-side
+validation in `src/server.py`. All numeric bounds are collected in
+`RESTRICTIONS.md`.

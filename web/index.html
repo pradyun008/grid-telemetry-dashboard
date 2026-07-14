@@ -49,6 +49,30 @@
     display: inline-flex; align-items: center; gap: 8px;
     font-size: 12px; letter-spacing: .06em; color: var(--ink-dim);
   }
+  .mode-toggle {
+    display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+  }
+  .mode-toggle button {
+    font: inherit; font-size: 12px; letter-spacing: .04em; padding: 6px 12px;
+    background: var(--panel-2); color: var(--ink-dim); border: none; cursor: pointer;
+  }
+  .mode-toggle button.active { background: var(--ink-faint); color: var(--bg); font-weight: 600; }
+  .batch-controls {
+    display: none; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-dim);
+    padding: 10px 24px; border-bottom: 1px solid var(--line);
+  }
+  .batch-controls.show { display: flex; }
+  .batch-controls label { display: inline-flex; align-items: center; gap: 6px; }
+  .batch-controls input {
+    width: 70px; font: inherit; font-size: 12px; background: var(--panel-2);
+    color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px;
+  }
+  .batch-controls button {
+    font: inherit; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+    background: var(--ok); color: #04210b; border: none; border-radius: 4px;
+    padding: 6px 14px; cursor: pointer;
+  }
+  .batch-controls .err { color: var(--warn); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); }
   .dot.live { background: var(--ok); box-shadow: 0 0 0 0 rgba(63,185,80,.5); animation: pulse 2s infinite; }
   .dot.down { background: var(--warn); animation: none; }
@@ -111,20 +135,32 @@
     <h1>Grid Telemetry</h1>
     <span class="sub mono" id="clock" style="font-weight:700; color:var(--ink);">--:--:--</span>
     <div class="spacer"></div>
+    <div class="mode-toggle">
+      <button id="modeLive" class="active">Live (1&nbsp;Hz)</button>
+      <button id="modeBatch">Batch (CSV)</button>
+    </div>
     <span class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></span>
   </header>
+
+  <div class="batch-controls" id="batchControls">
+    <label>Points on screen <input type="number" id="batchPoints" value="60" min="1" max="10000" /></label>
+    <label>Refresh interval (s) <input type="number" id="batchRefresh" value="1" min="0.25" max="3600" step="0.25" /></label>
+    <label>Reporting rate (pts/s) <input type="number" id="batchReporting" value="2" min="1" max="1000" /></label>
+    <button id="batchStart">Start</button>
+    <span class="err" id="batchErr"></span>
+  </div>
 
   <main id="grid"></main>
 
   <footer>
-    Synthetic data &middot; 1&nbsp;Hz push (SSE) &middot; <span id="window">last 5&nbsp;min</span> sliding window &middot;
+    Synthetic data &middot; <span id="feedDesc">1&nbsp;Hz push (SSE)</span> &middot; <span id="window">last 10&nbsp;pts</span> window &middot;
     charts auto-range tightly around each channel's nominal so small moves stay visible.
   </footer>
 
   <script src="/static/vendor/uPlot.iife.min.js"></script>
   <script>
   (async function () {
-    const WINDOW = 10;             // points kept on screen (10 sec at 1 Hz)
+    let WINDOW = 10;                // points kept on screen; live=10, batch="points on screen" field
     const ACCENTS = ["--c0", "--c1", "--c2", "--c3"];
     const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
@@ -135,10 +171,37 @@
     const panels = {};         // key -> { plot, valueEl, deltaEl, healthEl }
     const xs = [];             // shared timestamps (seconds)
     const ys = {};             // key -> array of values
+    const batchStarts = [];    // batch-mode: timestamps where each CSV batch begins
     channels.forEach((c) => { ys[c.key] = []; });
 
-    document.getElementById("window").textContent = "last " + WINDOW + " sec";
-
+    // uPlot plugin: in batch mode, draw a vertical divider at the start of each
+    // CSV batch so it's clear where one file's data ends and the next begins.
+    function batchDividerPlugin() {
+      return {
+        hooks: {
+          draw: (u) => {
+            if (mode !== "batch" || batchStarts.length === 0) return;
+            const ctx = u.ctx;
+            const { left, top, width, height } = u.bbox;
+            const dpr = u.pxRatio || window.devicePixelRatio || 1;
+            ctx.save();
+            ctx.strokeStyle = "rgba(230, 237, 243, 0.7)";
+            ctx.lineWidth = 2 * dpr;
+            ctx.setLineDash([6 * dpr, 5 * dpr]);
+            batchStarts.forEach((t) => {
+              if (xs.length && t <= xs[0]) return; // skip divider glued to y-axis
+              const x = Math.round(u.valToPos(t, "x", true)) + 0.5;
+              if (x < left || x > left + width) return;
+              ctx.beginPath();
+              ctx.moveTo(x, top);
+              ctx.lineTo(x, top + height);
+              ctx.stroke();
+            });
+            ctx.restore();
+          },
+        },
+      };
+    }
 
     // 2) Build a panel + chart per channel.
     const grid = document.getElementById("grid");
@@ -170,6 +233,7 @@
         height: 150,
         cursor: { y: false, points: { size: 5 } },
         legend: { show: false },
+        plugins: [batchDividerPlugin()],
         scales: { x: { time: true }, y: { range: [0, 50] } },
         axes: [
           {
@@ -258,35 +322,191 @@
       });
     }
 
-    // 4) Connect to the live stream.
+    // 4) Feed sources: live (SSE, 1 point/sec) or batch (poll a CSV file on
+    // a schedule). Only one is active at a time; switching modes resets state.
+    // See DECISIONS.md D8.
     const dot = document.getElementById("dot");
     const statusText = document.getElementById("statusText");
     const clock = document.getElementById("clock");
+    const windowEl = document.getElementById("window");
+    const feedDescEl = document.getElementById("feedDesc");
+
+    let mode = "live";
+    let liveSource = null;
+    let batchTimer = null;
+    let lastBatchSeq = null;
 
     function setStatus(state) {
       dot.className = "dot " + state;
       statusText.textContent =
-        state === "live" ? "live · 1 Hz" : state === "down" ? "reconnecting…" : "connecting…";
+        state === "live" ? (mode === "live" ? "live · 1 Hz" : "live · polling") :
+        state === "down" ? "reconnecting…" : "connecting…";
     }
 
-    const es = new EventSource("/stream");
-    es.onopen = () => setStatus("live");
-    es.onerror = () => setStatus("down");
-    es.onmessage = (ev) => {
-      setStatus("live");
-      const s = JSON.parse(ev.data);
+    function resetData() {
+      xs.length = 0;
+      batchStarts.length = 0;
+      channels.forEach((c) => { ys[c.key].length = 0; });
+      render();
+    }
 
-      xs.push(s.t);
-      channels.forEach((c) => ys[c.key].push(s[c.key]));
-      if (xs.length > WINDOW) {
+    function updateClock(t) {
+      clock.textContent = new Date(t * 1000).toLocaleTimeString([], { hour12: false });
+    }
+
+    function pushSample(sample) {
+      xs.push(sample.t);
+      channels.forEach((c) => ys[c.key].push(sample[c.key]));
+    }
+
+    function trimTo(limit) {
+      while (xs.length > limit) {
         xs.shift();
         channels.forEach((c) => ys[c.key].shift());
       }
+    }
 
-      const d = new Date(s.t * 1000);
-      clock.textContent = d.toLocaleTimeString([], { hour12: false });
-      render();
-    };
+    // -- Live mode (SSE, 1 Hz) --------------------------------------------
+    function stopLive() {
+      if (liveSource) { liveSource.close(); liveSource = null; }
+    }
+
+    function startLive() {
+      mode = "live";
+      WINDOW = 10;
+      resetData();
+      windowEl.textContent = "last " + WINDOW + " sec";
+      feedDescEl.textContent = "1 Hz push (SSE)";
+      setStatus("connecting");
+
+      liveSource = new EventSource("/stream");
+      liveSource.onopen = () => setStatus("live");
+      liveSource.onerror = () => setStatus("down");
+      liveSource.onmessage = (ev) => {
+        setStatus("live");
+        const s = JSON.parse(ev.data);
+        pushSample(s);
+        trimTo(WINDOW);
+        updateClock(s.t);
+        render();
+      };
+    }
+
+    // -- Batch mode (poll /batch/latest, whole-window redraw per batch) ---
+    function stopBatch() {
+      if (batchTimer) { clearInterval(batchTimer); batchTimer = null; }
+      lastBatchSeq = null;
+      fetch("/batch/stop", { method: "POST" }).catch(() => {});
+    }
+
+    function parseCsv(text) {
+      const lines = text.trim().split("\n");
+      const header = lines[0].split(",");
+      return lines.slice(1).map((line) => {
+        const cells = line.split(",");
+        const row = {};
+        header.forEach((h, i) => { row[h] = parseFloat(cells[i]); });
+        return row;
+      });
+    }
+
+    async function pollBatch() {
+      try {
+        const res = await fetch("/batch/latest");
+        if (!res.ok) { setStatus("down"); return; }
+        const seq = res.headers.get("X-Batch-Seq");
+        if (seq === lastBatchSeq) return; // no new batch yet, skip re-render
+        lastBatchSeq = seq;
+
+        const rows = parseCsv(await res.text());
+        if (rows.length) batchStarts.push(rows[0].t); // mark where this CSV begins
+        rows.forEach((r) => pushSample(r));
+        trimTo(WINDOW);
+        while (batchStarts.length && xs.length && batchStarts[0] < xs[0]) {
+          batchStarts.shift(); // drop boundaries scrolled off the left edge
+        }
+
+        const last = rows[rows.length - 1];
+        if (last) updateClock(last.t);
+        setStatus("live");
+        render();
+      } catch (e) {
+        setStatus("down");
+      }
+    }
+
+    async function startBatch(points, refresh, reporting) {
+      mode = "batch";
+      WINDOW = points;                 // window is now a direct input, not 2×rows
+      lastBatchSeq = null;
+      resetData();
+      windowEl.textContent = "last " + WINDOW + " pts";
+      feedDescEl.textContent = reporting + " pts/s, refresh " + refresh + "s";
+      setStatus("connecting");
+
+      await fetch(`/batch/start?points=${points}&refresh=${refresh}&reporting=${reporting}`, { method: "POST" });
+      await pollBatch();
+      if (batchTimer) clearInterval(batchTimer);
+      batchTimer = setInterval(pollBatch, refresh * 1000);
+    }
+
+    // -- Mode toggle + batch controls wiring -------------------------------
+    const modeLiveBtn = document.getElementById("modeLive");
+    const modeBatchBtn = document.getElementById("modeBatch");
+    const batchControls = document.getElementById("batchControls");
+    const batchErr = document.getElementById("batchErr");
+
+    modeLiveBtn.addEventListener("click", () => {
+      if (mode === "live") return;
+      modeLiveBtn.classList.add("active");
+      modeBatchBtn.classList.remove("active");
+      batchControls.classList.remove("show");
+      stopBatch();
+      startLive();
+    });
+
+    modeBatchBtn.addEventListener("click", () => {
+      if (mode === "batch") return;
+      modeBatchBtn.classList.add("active");
+      modeLiveBtn.classList.remove("active");
+      batchControls.classList.add("show");
+      stopLive();
+      mode = "batch";
+      resetData();
+      setStatus("connecting");
+      statusText.textContent = "waiting to start…";
+      feedDescEl.textContent = "CSV batch (configure & press Start)";
+    });
+
+    document.getElementById("batchStart").addEventListener("click", () => {
+      const points = parseInt(document.getElementById("batchPoints").value, 10);
+      const refresh = parseFloat(document.getElementById("batchRefresh").value);
+      const reporting = parseInt(document.getElementById("batchReporting").value, 10);
+      batchErr.textContent = "";
+
+      if (!Number.isInteger(reporting) || reporting < 1 || reporting > 1000) {
+        batchErr.textContent = "reporting must be 1-1000 pts/s";
+        return;
+      }
+      const minRefresh = Math.max(0.25, 1 / reporting);
+      if (!(refresh >= minRefresh) || refresh > 3600) {
+        batchErr.textContent = "refresh must be " + (Math.round(minRefresh * 1000) / 1000) + "-3600s (can't beat reporting rate)";
+        return;
+      }
+      const batch = Math.ceil(reporting * refresh);
+      if (batch > 10000) {
+        batchErr.textContent = "reporting × refresh = " + batch + " rows/CSV exceeds 10000; lower reporting or refresh";
+        return;
+      }
+      if (!Number.isInteger(points) || points < batch || points > 10000) {
+        batchErr.textContent = "points must be " + batch + "-10000 (≥ one batch)";
+        return;
+      }
+      startBatch(points, refresh, reporting);
+    });
+
+    // 5) Kick off in live mode.
+    startLive();
   })();
   </script>
 </body>

@@ -163,3 +163,42 @@ window derivation, prefetching, global vs. per-session state).
 **Next.** Write an implementation plan for D8 and build
 `src/batch_simulator.py`, the `/batch/*` endpoints in `src/server.py`, and
 the mode toggle + polling logic in `web/index.html`.
+
+---
+
+## 2026-07-13 — Batch mode: three independent knobs + pre-generated data
+
+**Goal.** Split CSV batch mode's two coupled inputs (rows-per-CSV, feed
+interval; window hard-derived as 2×rows) into three independent fields —
+points on screen, refresh interval, reporting rate — and switch from
+on-the-spot generation to a pre-generated looping pool.
+
+**Steps.**
+1. Rewrote `BatchGenerator` (`src/batch_simulator.py`): pre-generates a fixed
+   pool of 10000 random value-rows, walks it at the reporting rate assigning
+   timestamps at report time, loops on exhaustion. Each `next_batch_csv()`
+   emits the points that came due in one refresh (point-spacing model).
+2. Reworked `/batch/start` to take `points`, `refresh`, `reporting` and
+   validate every restriction (see RESTRICTIONS.md).
+3. Updated `web/index.html`: three fields, window sized directly from points,
+   client-side validation mirroring the server.
+4. Added `RESTRICTIONS.md`; pointed `CLAUDE.md` at it and `LOG.md`.
+5. Added pytest suite (`tests/`) covering pool determinism, constant vs
+   wobbling batch sizes, timestamp spacing, pool looping, and all
+   server-side validation branches.
+
+**Inputs / environment.** Python 3.11, FastAPI, pytest 8.3.4, httpx 0.28.1.
+
+**Results.** `python -m pytest -v` green (13 tests). Manual browser checks:
+constant and wobbling batch sizes confirmed via DevTools; all invalid combos
+blocked with inline errors before any request.
+
+**Rationale.** See DECISIONS.md D9 in full. Headline: separate production
+(reporting rate), delivery (refresh interval), and display (points) so each
+is reasoned about independently; pre-generated pool keeps the underlying
+dataset stable while reporting rate only changes walk speed.
+
+**Dead ends.**
+- Considered forcing equal-size CSVs by constraining refresh to multiples of
+  the point spacing — rejected (re-couples refresh to reporting, rejects
+  typed values). Allowed the wobble instead.
