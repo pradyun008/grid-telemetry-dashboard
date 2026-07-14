@@ -143,8 +143,9 @@
   </header>
 
   <div class="batch-controls" id="batchControls">
-    <label>Rows per CSV <input type="number" id="batchRows" value="30" min="1" max="10000" /></label>
-    <label>Feed interval (s) <input type="number" id="batchInterval" value="30" min="1" max="3600" /></label>
+    <label>Points on screen <input type="number" id="batchPoints" value="60" min="1" max="10000" /></label>
+    <label>Refresh interval (s) <input type="number" id="batchRefresh" value="1" min="0.25" max="3600" step="0.25" /></label>
+    <label>Reporting rate (pts/s) <input type="number" id="batchReporting" value="2" min="1" max="1000" /></label>
     <button id="batchStart">Start</button>
     <span class="err" id="batchErr"></span>
   </div>
@@ -152,7 +153,7 @@
   <main id="grid"></main>
 
   <footer>
-    Synthetic data &middot; <span id="feedDesc">1&nbsp;Hz push (SSE)</span> &middot; <span id="window">last 5&nbsp;min</span> window &middot;
+    Synthetic data &middot; <span id="feedDesc">1&nbsp;Hz push (SSE)</span> &middot; <span id="window">last 10&nbsp;pts</span> window &middot;
     charts auto-range tightly around each channel's nominal so small moves stay visible.
   </footer>
 
@@ -434,19 +435,19 @@
       }
     }
 
-    async function startBatch(rows, interval) {
+    async function startBatch(points, refresh, reporting) {
       mode = "batch";
-      WINDOW = rows * 2;
+      WINDOW = points;                 // window is now a direct input, not 2×rows
       lastBatchSeq = null;
       resetData();
-      windowEl.textContent = "last " + WINDOW + " pts (2× " + rows + "-row batch)";
-      feedDescEl.textContent = rows + "-row CSV every " + interval + "s";
+      windowEl.textContent = "last " + WINDOW + " pts";
+      feedDescEl.textContent = reporting + " pts/s, refresh " + refresh + "s";
       setStatus("connecting");
 
-      await fetch(`/batch/start?rows=${rows}&interval=${interval}`, { method: "POST" });
+      await fetch(`/batch/start?points=${points}&refresh=${refresh}&reporting=${reporting}`, { method: "POST" });
       await pollBatch();
       if (batchTimer) clearInterval(batchTimer);
-      batchTimer = setInterval(pollBatch, interval * 1000);
+      batchTimer = setInterval(pollBatch, refresh * 1000);
     }
 
     // -- Mode toggle + batch controls wiring -------------------------------
@@ -478,18 +479,30 @@
     });
 
     document.getElementById("batchStart").addEventListener("click", () => {
-      const rows = parseInt(document.getElementById("batchRows").value, 10);
-      const interval = parseFloat(document.getElementById("batchInterval").value);
+      const points = parseInt(document.getElementById("batchPoints").value, 10);
+      const refresh = parseFloat(document.getElementById("batchRefresh").value);
+      const reporting = parseInt(document.getElementById("batchReporting").value, 10);
       batchErr.textContent = "";
-      if (!Number.isInteger(rows) || rows < 1 || rows > 10000) {
-        batchErr.textContent = "rows must be 1-10000";
+
+      if (!Number.isInteger(reporting) || reporting < 1 || reporting > 1000) {
+        batchErr.textContent = "reporting must be 1-1000 pts/s";
         return;
       }
-      if (!(interval > 0) || interval > 3600) {
-        batchErr.textContent = "interval must be 1-3600s";
+      const minRefresh = Math.max(0.25, 1 / reporting);
+      if (!(refresh >= minRefresh) || refresh > 3600) {
+        batchErr.textContent = "refresh must be " + (Math.round(minRefresh * 1000) / 1000) + "-3600s (can't beat reporting rate)";
         return;
       }
-      startBatch(rows, interval);
+      const batch = Math.ceil(reporting * refresh);
+      if (batch > 10000) {
+        batchErr.textContent = "reporting × refresh = " + batch + " rows/CSV exceeds 10000; lower reporting or refresh";
+        return;
+      }
+      if (!Number.isInteger(points) || points < batch || points > 10000) {
+        batchErr.textContent = "points must be " + batch + "-10000 (≥ one batch)";
+        return;
+      }
+      startBatch(points, refresh, reporting);
     });
 
     // 5) Kick off in live mode.
